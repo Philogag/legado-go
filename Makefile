@@ -1,8 +1,11 @@
 BINARY := bin/legado-server
 PKG := ./cmd/server
 FIXTURE := bin/fixtureserver
+IMAGE ?= legado-go:local
+PLATFORMS ?= linux/amd64,linux/arm64
 
-.PHONY: all build fixture run test vet fmt cover smoke example clean docs
+.PHONY: all build fixture run test vet fmt cover smoke example clean docs \
+        docker-build docker-multi docker-run docker-smoke docker-stop compose-up compose-down
 
 all: vet test build
 
@@ -51,3 +54,41 @@ docs: ## 列出文档
 
 clean:
 	rm -rf bin coverage.out coverage.html
+
+# ---------------------------------------------------------------- 容器相关
+docker-build: ## 本地构建镜像（当前架构）
+	docker build --build-arg VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev) \
+	  -t $(IMAGE) .
+
+docker-multi: ## 多架构构建（需 buildx；不推送，产出 OCI 归档）
+	docker buildx build --platform $(PLATFORMS) \
+	  --build-arg VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev) \
+	  -t $(IMAGE) --output type=oci,dest=/tmp/legado-go-oci.tar .
+	@echo "OCI 归档: /tmp/legado-go-oci.tar"
+
+docker-run: docker-build ## 前台运行镜像（只读 + 非 root）
+	docker run --rm -p 8080:8080 --read-only --tmpfs /tmp \
+	  --cap-drop ALL --security-opt no-new-privileges:true $(IMAGE)
+
+docker-smoke: docker-build ## 容器冒烟：/healthz /readyz /mcp + 内置健康检查
+	@docker rm -f legado-smoke >/dev/null 2>&1 || true
+	docker run -d --name legado-smoke -p 18089:8080 $(IMAGE) >/dev/null
+	@sleep 7  # 等 HEALTHCHECK 的 start-period(5s) 过去
+	@echo -n "healthz="; curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:18089/healthz
+	@echo -n "readyz=";  curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:18089/readyz
+	@echo "--- MCP tools/list"; \
+	  curl -s -X POST http://127.0.0.1:18089/mcp -H 'content-type: application/json' \
+	    -H 'MCP-Protocol-Version: 2026-07-28' \
+	    -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | head -c 200; echo
+	@docker inspect -f 'health={{.State.Health.Status}}' legado-smoke
+	@docker rm -f legado-smoke >/dev/null
+
+docker-stop: ## 删除冒烟容器
+	-docker rm -f legado-smoke
+
+compose-up: ## docker compose 构建并启动
+	docker compose up -d --build
+	docker compose ps
+
+compose-down: ## 停止并删除 compose 栈
+	docker compose down

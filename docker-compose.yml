@@ -1,0 +1,62 @@
+# legado-go 微服务编排
+#
+#   docker compose up -d --build          # 本地构建并启动
+#   docker compose pull && docker compose up -d   # 直接用 ghcr 镜像
+#   docker compose logs -f legado
+#
+# 所有可调参数都可用环境变量或同目录 .env 覆盖（见 .env.example）。
+name: legado-go
+
+services:
+  legado:
+    # IMAGE 为空时走本地构建；想用已发布镜像就设 IMAGE=ghcr.io/philogag/legado-go:latest
+    image: ${IMAGE:-legado-go:local}
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-dev}
+    container_name: legado-go
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      ADDR: ":8080"
+      DEFAULT_TTL: ${DEFAULT_TTL:-30m}
+      MAX_TTL: ${MAX_TTL:-6h}
+      MAX_INSTANCES: ${MAX_INSTANCES:-64}
+      SWEEP_INTERVAL: ${SWEEP_INTERVAL:-5s}
+      GRACE_PERIOD: ${GRACE_PERIOD:-10m}
+      HTTP_TIMEOUT: ${HTTP_TIMEOUT:-30s}
+      CACHE_TTL: ${CACHE_TTL:-1h}
+      # 生产环境务必设置（Bearer token 同时保护 /api/v1/* 与 /mcp）
+      API_TOKEN: ${API_TOKEN:-}
+      RATE_LIMIT: ${RATE_LIMIT:-0}
+      QUIET: ${QUIET:-1}
+      VERBOSE_JS: ${VERBOSE_JS:-0}
+      SHUTDOWN_TIMEOUT: ${SHUTDOWN_TIMEOUT:-10s}
+    healthcheck:
+      # distroless 无 shell，健康检查走二进制内置的 -healthcheck 模式
+      test: ["CMD", "/legado-server", "-healthcheck", "http://127.0.0.1:8080/readyz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    # 进程内无本地状态（实例、缓存、Cookie 全在内存），可只读运行
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

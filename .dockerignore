@@ -1,0 +1,18 @@
+# 只把构建必需的内容送进 context，缩短构建时间
+.git
+.github
+bin/
+dist/
+coverage.out
+coverage.html
+*.log
+.tmp*
+docs/
+scripts/
+examples/
+README.md
+Makefile
+docker-compose.yml
+.env
+.env.*
+.dockerignore

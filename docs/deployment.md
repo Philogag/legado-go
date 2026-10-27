@@ -91,47 +91,91 @@ journalctl -u legado-booksource -f
 
 ## 4. 容器
 
-`Dockerfile`（多阶段、scratch 运行）：
+仓库已提供可直接使用的 [`Dockerfile`](../Dockerfile)、[`docker-compose.yml`](../docker-compose.yml)、[`.env.example`](../.env.example) 与 [`.github/workflows/docker-publish.yml`](../.github/workflows/docker-publish.yml)，下面的说明都是对这几个文件的解释。
 
-```dockerfile
-FROM golang:1.26-alpine AS build
-WORKDIR /src
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/legado-server ./cmd/server
+### 4.1 Dockerfile 要点
 
-FROM gcr.io/distroless/static:nonroot
-COPY --from=build /out/legado-server /legado-server
-EXPOSE 8080
-USER nonroot:nonroot
-ENTRYPOINT ["/legado-server"]
+| 项 | 做法 | 原因 |
+| --- | --- | --- |
+| 分阶段 | `golang:1.26-alpine` → `gcr.io/distroless/static-debian12:nonroot` | 运行镜像约 15 MB，无 shell/包管理器，攻击面最小 |
+| 多架构 | `FROM --platform=$BUILDPLATFORM` + `TARGETOS/TARGETARCH` | 编译器跑在本机架构上**交叉编译**，避免把整个构建阶段扔进 qemu 模拟 |
+| 静态链接 | `CGO_ENABLED=0` | 可跑在 distroless/scratch，无 glibc 依赖 |
+| 层缓存 | 先 `COPY go.mod go.sum` 再 `go mod download`，并挂 `--mount=type=cache` | 改业务代码不重复拉依赖 |
+| 非 root | `USER nonroot:nonroot`（uid 65532） | 容器逃逸后无特权 |
+| 健康检查 | `HEALTHCHECK CMD ["/legado-server", "-healthcheck", "http://127.0.0.1:8080/readyz"]` | distroless 没有 shell，只能用 exec 形式；二进制内置该模式，非 2xx 退出码 1 |
+| 版本信息 | `-ldflags "-X main.buildVersion/buildCommit/buildDate"` | `docker run --rm <img> -version` 可查构建来源 |
+
+```bash
+docker build -t legado-go:local .
+docker run --rm legado-go:local -version      # legado-go dev (commit -, built -)
+docker buildx build --platform linux/amd64,linux/arm64 -t legado-go:multi .
 ```
 
-```yaml
-# compose.yaml
-services:
-  legado:
-    build: .
-    ports: ["8080:8080"]
-    environment:
-      ADDR: ":8080"
-      DEFAULT_TTL: "10m"
-      MAX_INSTANCES: "512"
-      HTTP_TIMEOUT: "15s"
-      API_TOKEN: "${API_TOKEN:?set API_TOKEN}"
-      QUIET: "1"
-    read_only: true
-    security_opt: ["no-new-privileges:true"]
-    tmpfs: ["/tmp:size=16m"]
-    healthcheck:
-      test: ["CMD", "/legado-server", "-healthcheck", "http://127.0.0.1:8080/healthz"]
-      interval: 15s
-      timeout: 3s
-      retries: 3
+### 4.2 docker compose
+
+```bash
+cp .env.example .env          # 生产环境务必在 .env 里设置 API_TOKEN
+# 方式一：本地构建并启动
+docker compose up -d --build
+# 方式二：直接拉已发布镜像（.env 里设 IMAGE=ghcr.io/philogag/legado-go:latest）
+docker compose pull && docker compose up -d
+
+docker compose ps             # STATUS 列应显示 (healthy)
+curl -s localhost:8080/healthz; echo
+curl -s localhost:8080/readyz;  echo
+docker compose logs -f legado
+docker compose down           # 加 -v 会一并删网络
 ```
 
-> 镜像里没有 shell，健康检查请用编排层的 HTTP probe（Kubernetes `httpGet: /healthz`）或自带一个 `-healthcheck` 子命令。
+compose 里的加固与默认值：
+
+- `read_only: true` + `tmpfs: /tmp`：进程内无本地状态（实例、缓存、Cookie 全在内存），可只读运行
+- `cap_drop: [ALL]`、`no-new-privileges:true`、非 root
+- `stop_grace_period: 20s` 配合服务端 `SHUTDOWN_TIMEOUT=10s` 完成优雅停机
+- 资源上限 `cpus: 2 / memory: 512M`（`deploy.resources.limits`），按 §10 容量规划调整
+- 日志 `json-file` 轮转 10 MB × 3
+
+### 4.3 容器里做端到端演示
+
+`examples/book-source.json` 指向 `http://127.0.0.1:18081`（本机 fixture 假书站）。容器内的 `127.0.0.1` 是容器自己，**不是宿主机**，要二选一：
+
+```bash
+# 方案 A：让容器能解析宿主机（把书源 URL 改成 http://host.docker.internal:18081）
+docker run --add-host=host.docker.internal:host-gateway -p 8080:8080 legado-go:local
+# 方案 B：fixture 与微服务同网络
+docker network create legado-demo
+go run ./tools/fixtureserver -addr 0.0.0.0:18081   # 宿主机跑，书源 URL 用 http://<宿主机IP>:18081
+```
+
+### 4.4 CI/CD：多架构镜像发布到 ghcr.io
+
+工作流 `.github/workflows/docker-publish.yml` 使用 marketplace 上的 [`push-to-ghcr`](https://github.com/marketplace/actions/push-to-ghcr)（`macbre/push-to-ghcr@v18`，内部会准备好 QEMU + buildx 并推送）。
+
+触发与产出的镜像标签：
+
+| 事件 | 标签 |
+| --- | --- |
+| `push` 到 `main` / `master` | `latest`、`sha-<7位>` |
+| `push` tag `v1.2.3` | `1.2.3`、`latest` |
+| `release` published `v1.2.3` | `1.2.3`（action 自动取 release tag 并去掉 `v`） |
+| `pull_request` | 不推送：只 `docker build` 并起容器 curl `/healthz`、`/readyz`、`/mcp` 冒烟 |
+| `workflow_dispatch` | 手动指定 `platforms` 与是否推送 |
+
+关键配置：
+
+- `permissions: packages: write` + `secrets.GITHUB_TOKEN`（无需额外 PAT）
+- 默认平台 `linux/amd64,linux/arm64`（`env.PLATFORMS`，手动触发时可改）
+- 镜像名 `ghcr.io/${{ github.repository }}`，可用仓库变量 `IMAGE_NAME` 覆盖（自动转小写）
+- 版本号通过 `extra_args: --build-arg VERSION=` 注入，`-version` 可见
+- `needs: test`：`go vet` + `go test -race ./...` 不过不发布
+- 工作流会自动识别仓库布局：`Dockerfile` 在根目录或在 `projects/legado-go/` 下都能工作
+
+首次发布后，把包可见性改为 public（默认继承仓库可见性），或在使用方 `docker login ghcr.io -u <user> -p <PAT>`：
+
+```bash
+docker pull ghcr.io/philogag/legado-go:latest
+docker run --rm -p 8080:8080 -e API_TOKEN=$(openssl rand -hex 16) ghcr.io/philogag/legado-go:latest
+```
 
 ## 5. 反向代理（nginx）
 

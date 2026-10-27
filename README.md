@@ -123,6 +123,15 @@ go build -o legado-server ./cmd/server
 ADDR=:8080 DEFAULT_TTL=30m MAX_INSTANCES=64 ./legado-server
 ```
 
+或用容器（多架构镜像 `linux/amd64,linux/arm64`，distroless + 非 root，约 15 MB）：
+
+```bash
+docker compose up -d --build                                   # 本地构建并启动
+# 或拉已发布镜像
+docker run --rm -p 8080:8080 ghcr.io/philogag/legado-go:latest
+curl -s localhost:8080/healthz; echo
+```
+
 ### 4.1 实例生命周期（TTL）
 
 实例有三种「死法」，语义对齐通用 TTL 缓存：
@@ -179,8 +188,21 @@ curl -s -X POST localhost:8080/api/v1/instances/$ID/search \
 
 ---
 
-## 5. MCP（无状态，协议 `2026-07-28`）
+### 4.3 容器与 CI/CD
 
+| 文件 | 作用 |
+| --- | --- |
+| `Dockerfile` | 多阶段构建（`golang:1.26-alpine` → `distroless/static:nonroot`）；`--platform=$BUILDPLATFORM` 交叉编译；内置 `HEALTHCHECK` |
+| `docker-compose.yml` | 只读根文件系统、`cap_drop: ALL`、资源上限、日志轮转、`.env` 注入 |
+| `.env.example` | 全部可调参数模板（含 `API_TOKEN`） |
+| `.github/workflows/docker-publish.yml` | `go vet` + `go test -race` 门禁 → 用 [`push-to-ghcr`](https://github.com/marketplace/actions/push-to-ghcr) 多架构推送到 ghcr.io |
+
+镜像标签：`main`/`master` → `latest` + `sha-<7位>`；tag `v1.2.3` → `1.2.3` + `latest`；release → `1.2.3`；PR → 只构建并 curl `/healthz` `/readyz` `/mcp` 冒烟，不推送。
+
+本地等价命令：`make docker-build` / `make docker-multi` / `make docker-smoke` / `make compose-up`。
+完整说明见 [docs/deployment.md §4](docs/deployment.md#4-容器)。
+
+## 5. MCP（无状态，协议 `2026-07-28`）
 端点：`POST /mcp`，`Content-Type: application/json`，单次 JSON-RPC 消息，**无 `initialize`、无 `Mcp-Session-Id`**，
 每个请求自包含（详见 `docs/mcp-2026-07-28.md`）。能力通过 header 声明：
 

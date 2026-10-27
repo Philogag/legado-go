@@ -1,0 +1,208 @@
+name: Docker
+
+# 构建规则：
+#   push 到 main/master        → latest + sha-<7位>
+#   push tag v1.2.3            → 1.2.3 + latest
+#   release published v1.2.3   → 1.2.3（由 action 自动取 release tag）
+#   pull_request               → 只构建不推送（验证 Dockerfile）
+#   手动 workflow_dispatch     → 可选平台与是否推送
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+      - "Dockerfile"
+      - ".github/workflows/docker-publish.yml"
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: "目标平台（逗号分隔）"
+        default: "linux/amd64,linux/arm64"
+        required: false
+      push:
+        description: "是否推送到 ghcr.io"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # ghcr 镜像名（自动小写）。想改仓库名/多仓库发布时可覆盖为仓库变量 IMAGE_NAME
+  IMAGE_NAME: ${{ vars.IMAGE_NAME || github.repository }}
+  # 传入 docker build 的构建参数（action 只固定注入 BUILD_DATE / GITHUB_SHA）
+  PLATFORMS: ${{ inputs.platforms || 'linux/amd64,linux/arm64' }}
+
+jobs:
+  # ------------------------------------------------------------------ 测试门禁
+  test:
+    name: vet + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # 兼容两种仓库布局：Dockerfile 在仓库根，或位于 projects/legado-go/
+      - name: Resolve project dir
+        id: layout
+        run: |
+          if [ -f Dockerfile ]; then
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          elif [ -f projects/legado-go/Dockerfile ]; then
+            echo "dir=projects/legado-go" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::找不到 Dockerfile"; exit 1
+          fi
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ steps.layout.outputs.dir }}/go.mod
+          cache: true
+          cache-dependency-path: ${{ steps.layout.outputs.dir }}/go.sum
+
+      - name: go vet
+        working-directory: ${{ steps.layout.outputs.dir }}
+        run: go vet ./...
+
+      - name: go test
+        working-directory: ${{ steps.layout.outputs.dir }}
+        run: go test -race ./...
+
+  # ------------------------------------------------------- PR：只验证镜像可构建
+  docker_build_check:
+    name: docker build (no push)
+    if: github.event_name == 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve project dir
+        id: layout
+        run: |
+          if [ -f Dockerfile ]; then
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          elif [ -f projects/legado-go/Dockerfile ]; then
+            echo "dir=projects/legado-go" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::找不到 Dockerfile"; exit 1
+          fi
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ steps.layout.outputs.dir }}
+          file: ${{ steps.layout.outputs.dir }}/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: legado-go:pr-${{ github.event.pull_request.number }}
+
+      - name: Smoke test image
+        run: |
+          docker run -d --name smoke -p 18080:8080 legado-go:pr-${{ github.event.pull_request.number }}
+          for i in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:18080/healthz > /dev/null; then break; fi
+            sleep 1
+          done
+          echo "--- /healthz"; curl -fsS http://127.0.0.1:18080/healthz; echo
+          echo "--- /readyz";  curl -fsS http://127.0.0.1:18080/readyz;  echo
+          echo "--- MCP tools/list"
+          curl -fsS -X POST http://127.0.0.1:18080/mcp \
+            -H 'content-type: application/json' \
+            -H 'MCP-Protocol-Version: 2026-07-28' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | head -c 400
+          echo
+          docker rm -f smoke
+
+  # ------------------------------------------- 发布：多架构构建并推送到 ghcr.io
+  docker_publish:
+    name: build & push to ghcr
+    if: |
+      github.event_name == 'release' ||
+      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))) ||
+      (github.event_name == 'workflow_dispatch' && inputs.push)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve project dir
+        id: layout
+        run: |
+          if [ -f Dockerfile ]; then
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          elif [ -f projects/legado-go/Dockerfile ]; then
+            echo "dir=projects/legado-go" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::找不到 Dockerfile"; exit 1
+          fi
+
+      - name: Resolve image tags
+        id: meta
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          case "${GITHUB_EVENT_NAME}" in
+            release)
+              # 空值：交给 action 用 release tag（自动去 v 前缀）
+              TAGS=""
+              ;;
+            push)
+              if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+                TAGS="${VERSION},latest"
+              else
+                VERSION="sha-${GITHUB_SHA::7}"
+                TAGS="latest,${VERSION}"
+              fi
+              ;;
+            *)
+              VERSION="sha-${GITHUB_SHA::7}"
+              TAGS="${VERSION}"
+              ;;
+          esac
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "镜像标签: '${TAGS:-（release 默认）}'  版本: ${VERSION}"
+
+      # https://github.com/marketplace/actions/push-to-ghcr
+      - name: Build and publish multi-arch image to ghcr.io
+        uses: macbre/push-to-ghcr@v18
+        with:
+          image_name: ${{ env.IMAGE_NAME }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          dockerfile: ${{ steps.layout.outputs.dir }}/Dockerfile
+          context: ${{ steps.layout.outputs.dir }}
+          image_tag: ${{ steps.meta.outputs.tags }}
+          platforms: ${{ env.PLATFORMS }}
+          extra_args: --build-arg VERSION=${{ steps.meta.outputs.version }}
+
+      - name: Summary
+        run: |
+          {
+            echo "### 镜像已发布 :whale:"
+            echo
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 镜像 | \`ghcr.io/${IMAGE_NAME}\` |"
+            echo "| 标签 | \`${TAGS:-（release tag）}\` |"
+            echo "| 平台 | \`${PLATFORMS}\` |"
+            echo "| 提交 | \`${GITHUB_SHA}\` |"
+            echo
+            echo "拉取：\`docker pull ghcr.io/${IMAGE_NAME}:latest\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}

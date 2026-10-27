@@ -13,3 +13,8 @@ coverage.html
 # 日志与本地临时文件
 *.log
 .DS_Store
+
+# 本地环境变量（含密钥）
+.env
+.env.local
+.env.*.local

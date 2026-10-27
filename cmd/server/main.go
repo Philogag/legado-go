@@ -20,6 +20,13 @@ import (
 	"legado-go/internal/registry"
 )
 
+// 构建元信息，由 -ldflags -X 注入（见 Dockerfile）
+var (
+	buildVersion = "dev"
+	buildCommit  = ""
+	buildDate    = ""
+)
+
 func main() {
 	addr := flag.String("addr", env("ADDR", ":8080"), "监听地址")
 	defaultTTL := flag.Duration("ttl", envDuration("DEFAULT_TTL", 30*time.Minute), "默认实例空闲 TTL")
@@ -35,13 +42,20 @@ func main() {
 	verboseJS := flag.Bool("verbose-js", env("VERBOSE_JS", "0") == "1", "打印书源 JS 内的 console.log")
 	shutdownTimeout := flag.Duration("shutdown-timeout", envDuration("SHUTDOWN_TIMEOUT", 10*time.Second), "优雅停机宽限时长")
 	healthcheck := flag.String("healthcheck", "", "只做健康检查后退出：-healthcheck http://127.0.0.1:8080/healthz")
+	version := flag.Bool("version", false, "打印版本信息后退出")
 	flag.Parse()
+
+	if *version {
+		fmt.Printf("legado-go %s (commit %s, built %s)\n", buildVersion, orDash(buildCommit), orDash(buildDate))
+		return
+	}
 
 	if *healthcheck != "" {
 		os.Exit(probe(*healthcheck))
 	}
 
 	logger := log.New(os.Stdout, "[server] ", log.LstdFlags|log.Lmsgprefix)
+	logger.Printf("legado-go %s (commit %s, built %s)", buildVersion, orDash(buildCommit), orDash(buildDate))
 
 	reg := registry.New(registry.Options{
 		DefaultTTL:    *defaultTTL,
@@ -122,6 +136,13 @@ func probe(url string) int {
 		return 1
 	}
 	return 0
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 func env(key, def string) string {

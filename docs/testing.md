@@ -92,12 +92,16 @@ bash -x ./scripts/smoke.sh 2>&1 | tail -40
 - `registry` 用例**不用** sleep 等后台 ticker，统一用极短 TTL + 手动 `Sweep()`，避免 flaky。
 - 抓取类用例给 `httptest.Server` 设 `Timeout`，避免 CI 卡死。
 
-## CI 建议
+## CI
+
+仓库自带 `.github/workflows/docker-publish.yml`，push / PR / release 时自动执行：
 
 ```yaml
 - run: go vet ./...
-- run: go test -race ./...
-- run: ./scripts/smoke.sh
+- run: go test -race ./...        # test job，不通过则不发布镜像
+- run: docker build …             # PR：只构建 + curl /healthz /readyz /mcp 冒烟
+- uses: macbre/push-to-ghcr@v18   # push/release：多架构推送到 ghcr.io
 ```
 
 `-race` 在 `registry`/`netx`/`jsengine` 上会慢一些（约 +40%），但能挡住实例共享状态的回归。
+本地等价命令：`make vet test` / `make docker-smoke` / `./scripts/smoke.sh`。
