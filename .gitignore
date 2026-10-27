@@ -1,0 +1,15 @@
+# 构建产物
+/bin/
+/dist/
+*.exe
+
+# 测试/覆盖率
+coverage.out
+coverage.html
+*.test
+.tmp-example/
+.tmpdemo/
+
+# 日志与本地临时文件
+*.log
+.DS_Store

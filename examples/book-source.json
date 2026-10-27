@@ -1,0 +1,41 @@
+{
+  "bookSourceName": "本地测试源",
+  "bookSourceUrl": "http://127.0.0.1:18081",
+  "bookSourceType": 0,
+  "bookSourceGroup": "demo",
+  "enabled": true,
+  "searchUrl": "/search?q={{key}}&page={{page}}",
+  "exploreUrl": "分类##/search?q=分类&page={{page}}",
+  "header": "{\"User-Agent\":\"Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 legado-demo\"}",
+  "ruleSearch": {
+    "bookList": ".result .item",
+    "name": "a@text",
+    "author": ".author@text",
+    "kind": ".kind@text",
+    "bookUrl": "a@href"
+  },
+  "ruleExplore": {
+    "bookList": ".result .item",
+    "name": "a@text",
+    "author": ".author@text",
+    "bookUrl": "a@href"
+  },
+  "ruleBookInfo": {
+    "name": "h1@text",
+    "author": ".author@text",
+    "kind": ".kind@text",
+    "intro": "#intro@text",
+    "tocUrl": "a.toc@href"
+  },
+  "ruleToc": {
+    "chapterList": "ul.chapters > li",
+    "chapterName": "a@text",
+    "chapterUrl": "a@href"
+  },
+  "ruleContent": {
+    "title": "h1@text",
+    "content": "#content p",
+    "nextContentUrl": "a.next@href",
+    "replaceRegex": "\u00a0## \n\\n{2,}##\\n"
+  }
+}

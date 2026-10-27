@@ -1,0 +1,147 @@
+// 这是一个完整可运行的示例：把 legado-go 当作库用。
+//
+// 用法：
+//   1. go run ./tools/fixtureserver -addr 127.0.0.1:18081   # 起本地假书站
+//   2. cp examples/library_usage.go.txt /tmp/demo/main.go   # 复制到模块内任意包下
+//   3. go run /tmp/demo/main.go                             # 需要在该模块内 go run 才能 import internal
+//
+// 注意：internal/ 包只能被同一模块内的代码 import。
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"os"
+	"time"
+
+	"legado-go/internal/booksource"
+	"legado-go/internal/model"
+	"legado-go/internal/registry"
+)
+
+const fixtureSource = `{
+  "bookSourceUrl": "http://127.0.0.1:18081",
+  "bookSourceName": "本地假书源",
+  "searchUrl": "/search?q={{key}}&page={{page}}",
+  "ruleSearch": {
+    "bookList": ".result .item",
+    "name": "a@text",
+    "author": ".author@text",
+    "kind": ".kind@text",
+    "bookUrl": "a@href"
+  },
+  "ruleBookInfo": {
+    "name": "h1@text",
+    "author": ".author@text",
+    "kind": ".kind@text",
+    "intro": "#intro@text",
+    "tocUrl": "a.toc@href"
+  },
+  "ruleToc": {
+    "chapterList": "ul.chapters > li",
+    "chapterName": "a@text",
+    "chapterUrl": "a@href"
+  },
+  "ruleContent": {
+    "title": "h1@text",
+    "content": "#content p",
+    "nextContentUrl": "a.next@href"
+  }
+}`
+func main() {
+	// ── 1. 配置 → 实例 ─────────────────────────────────────────────
+	cfg, err := model.ParseConfig([]byte(fixtureSource))
+	check(err)
+
+	src, err := booksource.New(cfg, booksource.Options{
+		Timeout:  10 * time.Second,
+		CacheTTL: time.Minute,
+		OnLog:    func(line string) { log.Printf("[js] %s", line) },
+	})
+	check(err)
+	defer src.Close()
+
+	fmt.Printf("书源: %s (%s)\n", src.Name(), src.URL())
+
+	// ── 2. 搜索 ────────────────────────────────────────────────────
+	books, err := src.Search("剑", 1)
+	check(err)
+	fmt.Printf("搜索到 %d 本\n", len(books))
+	for _, b := range books {
+		fmt.Printf("  - %s / %s / %s\n", b.Name, b.Author, b.BookURL)
+	}
+	if len(books) == 0 {
+		os.Exit(0)
+	}
+
+	// ── 3. 详情 ────────────────────────────────────────────────────
+	info, err := src.GetBookInfo(&books[0])
+	check(err)
+	fmt.Printf("详情: %s 目录页=%s\n", info.Name, info.TocURL)
+
+	// ── 4. 目录 ────────────────────────────────────────────────────
+	chapters, err := src.GetChapterList(info)
+	check(err)
+	fmt.Printf("目录 %d 章\n", len(chapters))
+
+	// ── 5. 正文（自动跟随 nextContentUrl 合并多页）─────────────────
+	if len(chapters) > 0 {
+		content, err := src.GetContent(&chapters[0], info)
+		check(err)
+		fmt.Printf("正文 %q 共 %d 字节\n", content.Title, len(content.Content))
+	}
+
+	// ── 6. 直接调 JS（调试规则）────────────────────────────────────
+	out, err := src.EvalJS(`java.md5Encode(result)`, booksource.Bindings{Result: "abc"})
+	check(err)
+	fmt.Printf("md5(abc) = %v\n", out)
+
+	// ── 7. TTL 注册表：多实例 + 自动回收 ───────────────────────────
+	reg := registry.New(registry.Options{
+		DefaultTTL:    2 * time.Second, // 演示用：2 秒空闲即回收
+		SweepInterval: 500 * time.Millisecond,
+		GracePeriod:   time.Minute,
+		SourceOptions: booksource.Options{Timeout: 10 * time.Second},
+	})
+	defer reg.Close()
+
+	entry, err := reg.CreateWithID("demo", cfg, 0, "library-example")
+	check(err)
+	dump("created", entry)
+
+	// 访问即续期
+	time.Sleep(time.Second)
+	if _, err := reg.Get("demo"); err != nil {
+		log.Fatalf("get 失败: %v", err)
+	}
+	dump("touched", entry)
+
+	// 闲置超过 TTL → 回收（墓碑期内返回 EXPIRED）
+	time.Sleep(3 * time.Second)
+	reg.Sweep()
+	_, err = reg.Get("demo")
+	fmt.Printf("回收后 Get: kind=%s err=%v\n", model.KindOf(err), err)
+
+	// 同 ID 重建（墓碑被清理）
+	entry2, err := reg.CreateWithID("demo", cfg, 0, "library-example")
+	check(err)
+	dump("recreated", entry2)
+
+	// 后台扫描用的 context 示例：手动触发一次
+	fmt.Printf("Sweep 回收了 %d 个\n", reg.Sweep())
+	_ = context.Background()
+}
+
+func dump(tag string, e *registry.Entry) {
+	b, _ := json.Marshal(e.Info())
+	fmt.Printf("%s → %s\n", tag, b)
+}
+
+func check(err error) {
+	if err == nil {
+		return
+	}
+	log.Fatalf("kind=%s err=%v", model.KindOf(err), err)
+}
