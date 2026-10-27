@@ -2,6 +2,17 @@
 
 > 需要 Go 1.26+（`goja` 依赖新版运行时）。
 
+## 0. 一条命令试玩（Docker）
+
+不想装 Go 也可以，直接拉已发布的多架构镜像（amd64/arm64）：
+
+```bash
+docker run --rm -p 8080:8080 ghcr.io/philogag/legado-go:latest
+curl -s localhost:8080/healthz; echo
+```
+
+或在仓库里 `docker compose up -d --build`（参数见 `.env.example`，加固与运维见 [deployment.md](deployment.md#4-容器)）。
+
 ## 1. 构建与启动
 
 ```bash

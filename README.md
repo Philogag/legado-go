@@ -1,5 +1,8 @@
 # legado-go
 
+[![Docker](https://github.com/Philogag/legado-go/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/Philogag/legado-go/actions/workflows/docker-publish.yml)
+[![ghcr](https://img.shields.io/badge/ghcr.io-philogag%2Flegado--go-blue)](https://github.com/Philogag/legado-go/pkgs/container/legado-go)
+
 把 [legado](https://github.com/gedoor/legado) 的**书源调用引擎**从 Android 应用里拆解出来，
 重写为一个独立的 Go 库 + HTTP 微服务 + MCP 服务端。
 
